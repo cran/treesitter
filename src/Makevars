@@ -1,0 +1,31 @@
+PKG_CFLAGS = \
+        -I./tree-sitter/lib/include \
+        -I./tree-sitter/lib/src \
+        -I./rlang
+
+tree-sitter-files = \
+        tree-sitter/lib/src/lib.o
+
+lib-files = \
+        alloc.o \
+        dyn.o \
+        external-pointer.o \
+        init.o \
+        language.o \
+        node.o \
+        parser.o \
+        query-matches.o \
+        query.o \
+        rlang.o \
+        tree-cursor.o \
+        tree.o \
+        utils.o
+
+OBJECTS = $(tree-sitter-files) $(lib-files)
+
+all: $(SHLIB)
+
+clean:
+	rm -rf $(SHLIB) $(OBJECTS)
+
+.PHONY: all clean
