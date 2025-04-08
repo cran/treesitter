@@ -87,7 +87,10 @@ r_obj* ffi_query_matches(
 
     const r_ssize count = (r_ssize) match.capture_count;
 
-    r_obj* elt = r_alloc_list(2);
+    // Because we don't call `SET_VECTOR_ELT()` directly and instead call it
+    // through `r_dyn_list_push_back()`, rchk gets confused and thinks `elt`
+    // isn't protected, even though it definitely is. See PR #34 for more.
+    r_obj* elt = KEEP(r_alloc_list(2));
     r_dyn_list_push_back(p_pattern, elt);
     r_attrib_poke_names(elt, elt_names);
 
@@ -102,6 +105,8 @@ r_obj* ffi_query_matches(
       r_chr_poke(names, i, v_capture_names[capture.index]);
       r_list_poke(nodes, i, r_exec_new_node(capture.node, ffi_tree));
     }
+
+    FREE(1);
   }
 
   ts_query_cursor_delete(cursor);
@@ -302,12 +307,17 @@ r_obj* ffi_query_pattern_predicates(r_obj* ffi_query) {
 
       // Dispatch to helpers based on known predicate types
       if (str_equal(predicate_type, "eq?") ||
-          str_equal(predicate_type, "not-eq?")) {
+          str_equal(predicate_type, "not-eq?") ||
+          str_equal(predicate_type, "any-eq?") ||
+          str_equal(predicate_type, "any-not-eq?")) {
         r_dyn_list_push_back(
             p_predicates,
             predicate_eq(predicate_type, n_predicate_steps, steps, query)
         );
-      } else if (str_equal(predicate_type, "match?") || str_equal(predicate_type, "not-match?")) {
+      } else if (str_equal(predicate_type, "match?") ||
+                 str_equal(predicate_type, "not-match?") ||
+                 str_equal(predicate_type, "any-match?") ||
+                 str_equal(predicate_type, "any-not-match?")) {
         r_dyn_list_push_back(
             p_predicates,
             predicate_match(predicate_type, n_predicate_steps, steps, query)
@@ -350,7 +360,10 @@ static r_obj* predicate_eq(
     );
   }
 
-  const bool capture_invert = str_equal(predicate_type, "not-eq?");
+  const bool capture_invert = str_equal(predicate_type, "not-eq?") ||
+                              str_equal(predicate_type, "any-not-eq?");
+  const bool capture_any = str_equal(predicate_type, "any-eq?") ||
+                           str_equal(predicate_type, "any-not-eq?");
   const TSQueryPredicateStepType capture_name_type = steps[1].type;
   const uint32_t capture_name_value_id = steps[1].value_id;
   const TSQueryPredicateStepType capture_type = steps[2].type;
@@ -366,7 +379,7 @@ static r_obj* predicate_eq(
   switch (capture_type) {
     case TSQueryPredicateStepTypeCapture: {
       return predicate_eq_capture(
-          capture_name_value_id, capture_value_id, capture_invert
+          capture_name_value_id, capture_value_id, capture_invert, capture_any
       );
     }
     case TSQueryPredicateStepTypeString: {
@@ -378,7 +391,8 @@ static r_obj* predicate_eq(
           capture_name_value_id,
           capture_value,
           capture_value_length,
-          capture_invert
+          capture_invert,
+          capture_any
       );
     }
     case TSQueryPredicateStepTypeDone: {
@@ -409,7 +423,10 @@ static r_obj* predicate_match(
     );
   }
 
-  const bool capture_invert = str_equal(predicate_type, "not-match?");
+  const bool capture_invert = str_equal(predicate_type, "not-match?") ||
+                              str_equal(predicate_type, "any-not-match?");
+  const bool capture_any = str_equal(predicate_type, "any-match?") ||
+                           str_equal(predicate_type, "any-not-match?");
   const TSQueryPredicateStepType capture_name_type = steps[1].type;
   const uint32_t capture_name_value_id = steps[1].value_id;
   const TSQueryPredicateStepType capture_type = steps[2].type;
@@ -435,7 +452,11 @@ static r_obj* predicate_match(
   );
 
   return predicate_match_string(
-      capture_name_value_id, capture_value, capture_value_length, capture_invert
+      capture_name_value_id,
+      capture_value,
+      capture_value_length,
+      capture_invert,
+      capture_any
   );
 }
 
@@ -445,18 +466,21 @@ static r_obj* predicate_match(
 static r_obj* predicate_eq_capture(
     uint32_t capture_name_value_id,
     uint32_t capture_value_id,
-    bool capture_invert
+    bool capture_invert,
+    bool capture_any
 ) {
-  r_obj* out = KEEP(r_alloc_list(3));
+  r_obj* out = KEEP(r_alloc_list(4));
   r_list_poke(out, 0, r_dbl(r_uint32_as_dbl(capture_name_value_id)));
   r_list_poke(out, 1, r_dbl(r_uint32_as_dbl(capture_value_id)));
   r_list_poke(out, 2, r_lgl(capture_invert));
+  r_list_poke(out, 3, r_lgl(capture_any));
 
-  r_obj* names = r_alloc_character(3);
+  r_obj* names = r_alloc_character(4);
   r_attrib_poke_names(out, names);
   r_chr_poke(names, 0, r_str("capture_name_value_id"));
   r_chr_poke(names, 1, r_str("capture_value_id"));
   r_chr_poke(names, 2, r_str("capture_invert"));
+  r_chr_poke(names, 3, r_str("capture_any"));
 
   r_attrib_poke_class(out, r_chr("tree_sitter_predicate_eq_capture"));
 
@@ -484,6 +508,8 @@ static bool check_predicate_eq_capture(
 
   const bool capture_invert =
       r_arg_as_bool(r_list_get(predicate, 2), "capture_invert");
+  const bool capture_any =
+      r_arg_as_bool(r_list_get(predicate, 3), "capture_any");
 
   // First yank out all `node` indices that match the capture `value_id`s.
   // Relevant when there are "zero or more" or "one or more" predicate types.
@@ -503,6 +529,12 @@ static bool check_predicate_eq_capture(
     return false;
   }
 
+  bool any_passed = false;
+  bool all_passed = true;
+
+  // Go through each `capture_name` and `capture` pair and check that the
+  // captured text exactly matches (or doesn't match, if using
+  // `capture_invert`).
   for (r_ssize i = 0; i < size; ++i) {
     const int capture_name_index = v_capture_name_indices[i];
     const int capture_index = v_capture_indices[i];
@@ -510,6 +542,8 @@ static bool check_predicate_eq_capture(
     const TSQueryCapture capture_name = match->captures[capture_name_index];
     const TSQueryCapture capture = match->captures[capture_index];
 
+    // Note that `capture_name_text` and `capture_text` don't have a nul
+    // terminator, so we use `str_equal_sized()`
     uint32_t capture_name_size = 0;
     const char* capture_name_text =
         node_text(capture_name.node, text, text_size, &capture_name_size);
@@ -518,19 +552,25 @@ static bool check_predicate_eq_capture(
     const char* capture_text =
         node_text(capture.node, text, text_size, &capture_size);
 
-    const uint32_t n = r_uint32_max(capture_name_size, capture_size);
+    // Exact match
+    const bool passed = str_equal_sized(
+        capture_name_text,
+        capture_text,
+        (size_t) capture_name_size,
+        (size_t) capture_size
+    );
 
-    const bool eq =
-        str_equal_up_to(capture_name_text, capture_text, (size_t) n);
+    const bool done = apply_predicate_result(
+        passed, capture_invert, capture_any, &any_passed, &all_passed
+    );
 
-    if (eq == capture_invert) {
-      FREE(2);
-      return false;
+    if (done) {
+      break;
     }
   }
 
   FREE(2);
-  return true;
+  return capture_any ? any_passed : all_passed;
 }
 
 static r_obj*
@@ -566,7 +606,8 @@ static r_obj* predicate_eq_string(
     uint32_t capture_name_value_id,
     const char* capture_value,
     uint32_t capture_value_length,
-    bool capture_invert
+    bool capture_invert,
+    bool capture_any
 ) {
   r_obj* capture_value_sexp = KEEP(r_alloc_character(1));
   r_chr_poke(
@@ -577,16 +618,18 @@ static r_obj* predicate_eq_string(
       )
   );
 
-  r_obj* out = KEEP(r_alloc_list(3));
+  r_obj* out = KEEP(r_alloc_list(4));
   r_list_poke(out, 0, r_dbl(r_uint32_as_dbl(capture_name_value_id)));
   r_list_poke(out, 1, capture_value_sexp);
   r_list_poke(out, 2, r_lgl(capture_invert));
+  r_list_poke(out, 3, r_lgl(capture_any));
 
-  r_obj* names = r_alloc_character(3);
+  r_obj* names = r_alloc_character(4);
   r_attrib_poke_names(out, names);
   r_chr_poke(names, 0, r_str("capture_name_value_id"));
   r_chr_poke(names, 1, r_str("capture_value"));
   r_chr_poke(names, 2, r_str("capture_invert"));
+  r_chr_poke(names, 3, r_str("capture_any"));
 
   r_attrib_poke_class(out, r_chr("tree_sitter_predicate_eq_string"));
 
@@ -608,12 +651,21 @@ static bool check_predicate_eq_string(
       r_dbl_get(r_list_get(predicate, 0), 0), "capture_name_value_id"
   );
 
-  const char* capture_value = r_chr_get_c_string(r_list_get(predicate, 1), 0);
+  // Note `capture_value_size` is size without nul terminator
+  r_obj* capture_value_sexp = r_list_get(predicate, 1);
+  const char* capture_value = r_chr_get_c_string(capture_value_sexp, 0);
+  const uint32_t capture_value_size =
+      r_ssize_as_uint32(r_length(r_chr_get(capture_value_sexp, 0)));
 
   const bool capture_invert =
       r_arg_as_bool(r_list_get(predicate, 2), "capture_invert");
+  const bool capture_any =
+      r_arg_as_bool(r_list_get(predicate, 3), "capture_any");
 
   const uint16_t capture_count = match->capture_count;
+
+  bool any_passed = false;
+  bool all_passed = true;
 
   // Go through each `capture` that matches this predicate
   // `capture_name_value_id` and check that the captured `node`'s text exactly
@@ -627,18 +679,26 @@ static bool check_predicate_eq_string(
     }
 
     // Extract out location of this `node`s text
+    // Note that `elt` does not have a nul terminator, so we use
+    // `str_equal_sized()`
     uint32_t elt_size = 0;
     const char* elt = node_text(capture.node, text, text_size, &elt_size);
 
     // Exact match
-    bool eq = str_equal_up_to(elt, capture_value, (size_t) elt_size);
+    const bool passed = str_equal_sized(
+        elt, capture_value, (size_t) elt_size, (size_t) capture_value_size
+    );
 
-    if (eq == capture_invert) {
-      return false;
+    const bool done = apply_predicate_result(
+        passed, capture_invert, capture_any, &any_passed, &all_passed
+    );
+
+    if (done) {
+      break;
     }
   }
 
-  return true;
+  return capture_any ? any_passed : all_passed;
 }
 
 // -----------------------------------------------------------------------------
@@ -648,7 +708,8 @@ static r_obj* predicate_match_string(
     uint32_t capture_name_value_id,
     const char* capture_value,
     uint32_t capture_value_length,
-    bool capture_invert
+    bool capture_invert,
+    bool capture_any
 ) {
   r_obj* capture_value_sexp = KEEP(r_alloc_character(1));
   r_chr_poke(
@@ -659,16 +720,18 @@ static r_obj* predicate_match_string(
       )
   );
 
-  r_obj* out = KEEP(r_alloc_list(3));
+  r_obj* out = KEEP(r_alloc_list(4));
   r_list_poke(out, 0, r_dbl(r_uint32_as_dbl(capture_name_value_id)));
   r_list_poke(out, 1, capture_value_sexp);
   r_list_poke(out, 2, r_lgl(capture_invert));
+  r_list_poke(out, 3, r_lgl(capture_any));
 
-  r_obj* names = r_alloc_character(3);
+  r_obj* names = r_alloc_character(4);
   r_attrib_poke_names(out, names);
   r_chr_poke(names, 0, r_str("capture_name_value_id"));
   r_chr_poke(names, 1, r_str("capture_value"));
   r_chr_poke(names, 2, r_str("capture_invert"));
+  r_chr_poke(names, 3, r_str("capture_any"));
 
   r_attrib_poke_class(out, r_chr("tree_sitter_predicate_match_string"));
 
@@ -694,12 +757,15 @@ static bool check_predicate_match_string(
 
   const bool capture_invert =
       r_arg_as_bool(r_list_get(predicate, 2), "capture_invert");
+  const bool capture_any =
+      r_arg_as_bool(r_list_get(predicate, 3), "capture_any");
 
   const uint16_t capture_count = match->capture_count;
 
   r_obj* x = KEEP(r_alloc_character(1));
 
-  bool ok = true;
+  bool any_passed = false;
+  bool all_passed = true;
 
   // Go through each `capture` that matches this predicate
   // `capture_name_value_id` and check that the captured `node`'s text regex
@@ -723,16 +789,19 @@ static bool check_predicate_match_string(
         Rf_mkCharLenCE(elt, r_uint32_as_int(elt_size, "elt_size"), CE_UTF8)
     );
 
-    bool matches = r_grepl(x, pattern);
+    const bool passed = r_grepl(x, pattern);
 
-    if (matches == capture_invert) {
-      ok = false;
+    const bool done = apply_predicate_result(
+        passed, capture_invert, capture_any, &any_passed, &all_passed
+    );
+
+    if (done) {
       break;
     }
   }
 
   FREE(1);
-  return ok;
+  return capture_any ? any_passed : all_passed;
 }
 
 static bool r_grepl(r_obj* x, r_obj* pattern) {
@@ -766,4 +835,30 @@ static bool r_grepl(r_obj* x, r_obj* pattern) {
 
   FREE(1);
   return r_as_bool(out);
+}
+
+// -----------------------------------------------------------------------------
+// Predicate helpers
+
+// Finalizes the result of applying a single predicate to a single capture.
+// Returns a boolean indicating whether or not we can finish predicate checks
+// early.
+static bool apply_predicate_result(
+    bool passed,
+    bool capture_invert,
+    bool capture_any,
+    bool* any_passed,
+    bool* all_passed
+) {
+  if (capture_invert) {
+    passed = !passed;
+  }
+
+  // Apply this result
+  *any_passed |= passed;
+  *all_passed &= passed;
+
+  // Figure out if we can finish early or not.
+  // If we are doing `capture_all` and someone doesn't pass, we are done.
+  return !capture_any && !passed;
 }
