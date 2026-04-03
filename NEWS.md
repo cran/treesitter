@@ -1,3 +1,7 @@
+# treesitter 0.3.2
+
+* Removed usage of more non-API C functions.
+
 # treesitter 0.3.1
 
 * Removed usage of non-API `ATTRIB()` and `SET_ATTRIB()` (#41).
